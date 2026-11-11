@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { MathUtils, Vector2 } from 'three'
 
-export function usePointer() {
+export function usePointer(touch = false) {
   const pointer = useRef({
     target: new Vector2(), position: new Vector2(), slow: new Vector2(),
     velocity: new Vector2(), impulse: new Vector2(), present: 0, inside: false,
@@ -11,7 +11,7 @@ export function usePointer() {
     const state = pointer.current
     let lastTime = 0
     const update = (event: PointerEvent) => {
-      if (event.pointerType === 'touch') return
+      if (event.pointerType === 'touch' && !touch) return
       const x = event.clientX / innerWidth * 2 - 1
       const y = 1 - event.clientY / innerHeight * 2
       const duration = Math.max(12, event.timeStamp - lastTime)
@@ -26,15 +26,23 @@ export function usePointer() {
       lastTime = event.timeStamp
     }
     const reset = () => { state.inside = false; state.target.set(0, 0); state.impulse.set(0, 0) }
+    const touchStart = (event: PointerEvent) => { if (touch && event.pointerType === 'touch') update(event) }
+    const touchEnd = (event: PointerEvent) => { if (touch && event.pointerType === 'touch') reset() }
     window.addEventListener('pointermove', update, { passive: true })
+    window.addEventListener('pointerdown', touchStart, { passive: true })
+    window.addEventListener('pointerup', touchEnd, { passive: true })
+    window.addEventListener('pointercancel', touchEnd, { passive: true })
     document.documentElement.addEventListener('pointerleave', reset)
     window.addEventListener('blur', reset)
     return () => {
       window.removeEventListener('pointermove', update)
+      window.removeEventListener('pointerdown', touchStart)
+      window.removeEventListener('pointerup', touchEnd)
+      window.removeEventListener('pointercancel', touchEnd)
       document.documentElement.removeEventListener('pointerleave', reset)
       window.removeEventListener('blur', reset)
     }
-  }, [])
+  }, [touch])
 
   return pointer
 }

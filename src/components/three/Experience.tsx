@@ -1,4 +1,4 @@
-import { Environment, Lightformer } from '@react-three/drei'
+import { Environment, Lightformer, useProgress } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
@@ -14,8 +14,20 @@ import { PanelSequence } from './PanelSequence'
 import { SpatialLabel } from './SpatialLabel'
 import { AdaptiveQuality, Atmosphere } from './Atmosphere'
 import { ChapterType } from './ChapterType'
+import { EntryPortal, entryCameraDepth } from './EntryPortal'
+import type { AssetProgress, EntryPhase } from '../layout/EntryScreen'
 
-type Story = RefObject<JourneyState>
+type ExperienceProps = {
+  story: RefObject<JourneyState>
+  entry: EntryPhase
+  content: RefObject<HTMLDivElement | null>
+  onReady: (ready: boolean) => void
+  onPainted: (painted: boolean) => void
+  onProgress: (progress: AssetProgress) => void
+  onEntered: () => void
+}
+
+const entryDuration = 1.45
 
 export function Orbit({ radius, gold = false, arc = Math.PI * 2, angle = 0 }: { radius: number; gold?: boolean; arc?: number; angle?: number }) {
   return (
@@ -26,9 +38,10 @@ export function Orbit({ radius, gold = false, arc = Math.PI * 2, angle = 0 }: { 
   )
 }
 
-function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => void }) {
-  const { gl, size } = useThree()
-  const compact = size.width < 800
+function Scene({ story, entry, content, onReady, onPainted, onProgress, onEntered }: ExperienceProps) {
+  const getState = useThree(state => state.get)
+  const compact = useThree(state => state.size.width < 800)
+  const { active, loaded, total, errors } = useProgress()
   const map = useRef<Group>(null)
   const mapArt = useRef<Group>(null)
   const seal = useRef<Group>(null)
@@ -39,10 +52,12 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
   const networkRings = useRef<Group>(null)
   const capabilityRings = useRef<Group>(null)
   const light = useRef<PointLight>(null)
-  const pointer = usePointer()
+  const pointer = usePointer(entry !== 'complete')
+  const flight = useRef(0)
+  const elapsed = useRef(0)
   const travel = useRef({ progress: -1, speed: 0, hover: 0, time: 0 })
   const contextLost = useRef(false)
-  const scratch = useRef({ eye: new Vector3(), aim: new Vector3() })
+  const scratch = useRef({ eye: new Vector3(), aim: new Vector3(), entryEye: new Vector3(), entryAim: new Vector3() })
   const ray = useRef(new Raycaster())
   const surface = useRef({
     uDissolve: { value: 0 }, uGlow: { value: 0 }, uCharge: { value: 0 },
@@ -51,18 +66,66 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
   const networkReveal = useRef(0)
 
   useEffect(() => {
+    onProgress({ active, loaded, total })
+    if (errors.length) onReady(false)
+  }, [active, loaded, total, errors, onProgress, onReady])
+
+  useEffect(() => {
+    const { gl, scene, camera } = getState()
     const canvas = gl.domElement
-    const lost = (event: Event) => { event.preventDefault(); contextLost.current = true; onReady(false) }
-    const restored = () => { contextLost.current = false; onReady(true) }
+    const previousAfterRender = scene.onAfterRender
+    const previousShaderError = gl.debug.onShaderError
+    let generation = 0
+    let compiled = false
+    let shaderFailed = false
+    let painted = false
+
+    const prepare = () => {
+      const attempt = ++generation
+      compiled = false
+      shaderFailed = false
+      void gl.compileAsync(scene, camera).then(() => {
+        if (attempt === generation && !shaderFailed) compiled = true
+      }).catch(() => {
+        if (attempt === generation) onReady(false)
+      })
+    }
+    scene.onAfterRender = (...args) => {
+      previousAfterRender.apply(scene, args)
+      if (!painted && !shaderFailed && !contextLost.current) {
+        painted = true
+        onPainted(true)
+      }
+      if (compiled && !contextLost.current) {
+        compiled = false
+        if (!useProgress.getState().errors.length) onReady(true)
+      }
+    }
+    gl.debug.onShaderError = (...args) => {
+      previousShaderError?.(...args)
+      shaderFailed = true
+      compiled = false
+      onReady(false)
+    }
+    const lost = (event: Event) => {
+      event.preventDefault()
+      generation++
+      compiled = false
+      contextLost.current = true
+      onReady(false)
+    }
+    const restored = () => { contextLost.current = false; prepare() }
     canvas.addEventListener('webglcontextlost', lost)
     canvas.addEventListener('webglcontextrestored', restored)
-    const painted = requestAnimationFrame(() => { if (!contextLost.current) onReady(true) })
+    prepare()
     return () => {
-      cancelAnimationFrame(painted)
+      generation++
+      scene.onAfterRender = previousAfterRender
+      gl.debug.onShaderError = previousShaderError
       canvas.removeEventListener('webglcontextlost', lost)
       canvas.removeEventListener('webglcontextrestored', restored)
     }
-  }, [gl, onReady])
+  }, [getState, onReady, onPainted])
 
   useFrame(({ camera }, frameDelta) => {
     if (contextLost.current) return
@@ -79,7 +142,7 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
     const view = camera as PerspectiveCamera
     const index = Math.min(lastStop - 1, Math.floor(position))
     const fraction = position - index
-    const { eye, aim } = scratch.current
+    const { eye, aim, entryEye, entryAim } = scratch.current
 
     cameraPath.getPoint(position / lastStop, eye)
     aimPath.getPoint(position / lastStop, aim)
@@ -88,9 +151,24 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
     view.position.y += mouse.slow.y * 0.28
     aim.x += mouse.position.x * 0.16
     aim.y += mouse.position.y * 0.12
-    view.lookAt(aim)
-    view.rotateZ(MathUtils.lerp(stops[index].roll, stops[index + 1].roll, fraction) + mouse.velocity.x * 0.009)
     view.fov = MathUtils.lerp(stops[index].fov, stops[index + 1].fov, fraction) + Math.min(2.5, Math.abs(motion.speed) * 0.4)
+    let handoff = 1
+    if (entry !== 'complete') {
+      const arrived = elapsed.current >= entryDuration
+      if (entry === 'entering') elapsed.current = Math.min(entryDuration, elapsed.current + delta)
+      flight.current = elapsed.current / entryDuration
+      const t = flight.current
+      handoff = MathUtils.smoothstep(t, .61, 1)
+      entryEye.set(mouse.slow.x * .42 * (1 - t), mouse.slow.y * .32 * (1 - t), entryCameraDepth - 14 * t * t)
+      entryAim.set(mouse.position.x * .08 * (1 - t), mouse.position.y * .07 * (1 - t), entryEye.z - 10)
+      view.position.lerpVectors(entryEye, view.position, handoff)
+      aim.lerpVectors(entryAim, aim, handoff)
+      view.fov = MathUtils.lerp(44 + Math.sin(t * Math.PI) * 5, view.fov, handoff)
+      content.current?.style.setProperty('--entry-reveal', String(MathUtils.smoothstep(t, .73, 1)))
+      if (arrived && entry === 'entering') onEntered()
+    }
+    view.lookAt(aim)
+    view.rotateZ(handoff * (MathUtils.lerp(stops[index].roll, stops[index + 1].roll, fraction) + mouse.velocity.x * 0.009))
     view.updateProjectionMatrix()
     view.updateMatrixWorld()
     ray.current.setFromCamera(mouse.position, view)
@@ -167,6 +245,7 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
     <>
       <AdaptiveQuality />
       <Atmosphere journey={story} motion={travel} pointer={pointer} compact={compact} />
+      {entry !== 'complete' && <EntryPortal pointer={pointer} flight={flight} compact={compact} />}
       <ambientLight intensity={1.2} color="#a6c5ff" />
       <directionalLight position={[-3, 6, 8]} color="#ffdfad" intensity={2.5} />
       <pointLight ref={light} color="#297dff" intensity={39} distance={28} />
@@ -211,11 +290,11 @@ function Scene({ story, onReady }: { story: Story; onReady: (ready: boolean) => 
   )
 }
 
-export default function Experience({ story, onReady }: { story: Story; onReady: (ready: boolean) => void }) {
+export default function Experience(props: ExperienceProps) {
   return (
     <div className="experience" aria-hidden="true">
       <Canvas camera={{ position: [0, 0, 14], fov: 42, near: 0.08, far: 160 }} dpr={[0.75, 1.4]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
-        <Scene story={story} onReady={onReady} />
+        <Scene {...props} />
       </Canvas>
     </div>
   )

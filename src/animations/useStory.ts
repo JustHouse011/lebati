@@ -134,6 +134,7 @@ export function useStory(immersive: boolean) {
     }
 
     function keys(event: KeyboardEvent) {
+      if (document.documentElement.classList.contains('entry-locked')) return
       if (!immersive || event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
       const target = event.target as Element | null

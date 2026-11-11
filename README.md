@@ -18,6 +18,8 @@ The enquiry form validates input in the browser. Delivery requires an integratio
 
 ## Scene navigation
 
+The entry plays once per tab session. Add `?entry=replay` to the URL to replay it. The page removes that parameter after entry.
+
 The scroll controller measures chapter and verification stops from the page layout. Scroll position drives one reversible camera path through the WebGL world. The chapter rail and arrow keys jump between stops. In the verification chapter, each step button targets its corresponding camera position. The reduced-motion and WebGL fallback views expose all four steps as ordinary HTML.
 
 ## Visual assets
